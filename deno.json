@@ -1,0 +1,7 @@
+{
+  "tasks": {
+    "build": "mkdir -p ./dist && zig build-exe -O ReleaseSafe ./src/main.zig -femit-bin=./dist/age.exe",
+    "enc": "./dist/age enc",
+    "dec": "./dist/age dec"
+  }
+}
