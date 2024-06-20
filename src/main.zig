@@ -27,15 +27,16 @@ pub fn encrypt(allocator: mem.Allocator, msg: []const u8, password: []const u8, 
     var derived: [32]u8 = undefined;
     try kdf(allocator, &derived, password, salt, m, t, p);
 
-    const data = try allocator.alloc(u8, zip.LocalFileHeader.SIZE + salt.len + msg.len + 16);
+    const data = try allocator.alloc(u8, zip.Size(zip.LocalFileHeader) + salt.len + msg.len + 16);
     errdefer allocator.free(data);
-    data[0..zip.LocalFileHeader.SIZE].* = zip.pack(
+    zip.packTo(
         zip.LocalFileHeader,
+        data,
         .{ .crc32 = m, ._3 = t, ._2 = p, .name_len = @intCast(salt.len), .comp_size = 0, .size = 0 },
     );
-    std.mem.copyForwards(u8, data[zip.LocalFileHeader.SIZE..][0..salt.len], salt);
+    @memcpy(data[zip.Size(zip.LocalFileHeader)..][0..salt.len], salt);
 
-    const encrypted = data[zip.LocalFileHeader.SIZE + salt.len ..];
+    const encrypted = data[zip.Size(zip.LocalFileHeader) + salt.len ..];
     const key: *[16]u8 = derived[0..16];
     const iv: *[12]u8 = derived[16..28];
     const tag: *[16]u8 = encrypted[msg.len..][0..16];
@@ -45,11 +46,11 @@ pub fn encrypt(allocator: mem.Allocator, msg: []const u8, password: []const u8, 
 
 pub fn decrypt(allocator: mem.Allocator, data: []const u8, password: []const u8) ![]u8 {
     const header = try zip.unpack(zip.LocalFileHeader, data);
-    const salt = data[zip.LocalFileHeader.SIZE..][0..header.name_len];
+    const salt = data[zip.Size(zip.LocalFileHeader)..][0..header.name_len];
     var derived: [32]u8 = undefined;
     try kdf(allocator, &derived, password, salt, header.crc32, header._3, header._2);
 
-    const encrypted = data[zip.LocalFileHeader.SIZE + header.name_len + header.extra_len ..];
+    const encrypted = data[zip.Size(zip.LocalFileHeader) + header.name_len + header.extra_len ..];
     const msg = try allocator.alloc(u8, encrypted.len - 16);
     errdefer allocator.free(msg);
     const key: *[16]u8 = derived[0..16];
@@ -65,7 +66,8 @@ pub fn withSuffix(allocator: mem.Allocator, path: []const u8) ![]const u8 {
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 pub fn main() !void {
-    if (builtin.os.tag == .windows) {
+    comptime if (builtin.cpu.arch.endian() != .little) unreachable;
+    if (comptime builtin.os.tag == .windows) {
         _ = std.os.windows.kernel32.SetConsoleOutputCP(65001);
     }
 
@@ -97,10 +99,10 @@ pub fn main() !void {
         defer output.close();
 
         try zip.write(
-            output,
+            output.writer().any(),
             "!encrypted.txt",
             "本文件已加密",
-            encrypted,
+            &[_][]const u8{encrypted},
         );
     } else if (mem.eql(u8, args[1], "dec")) {
         const input_name = try withSuffix(alloc, args[2]);
