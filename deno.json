@@ -1,7 +1,12 @@
 {
+  "imports": {
+    "hash-wasm": "npm:hash-wasm/dist/index.esm.min.js"
+  },
   "tasks": {
-    "build": "mkdir -p ./dist && zig build-exe -O ReleaseSafe ./src/main.zig -femit-bin=./dist/age.exe",
-    "enc": "./dist/age enc",
-    "dec": "./dist/age dec"
+    "build:zig": "mkdir -p ./dist && zig build-exe -O ReleaseSafe ./src/main.zig -femit-bin=./dist/age.exe",
+    "end": "deno run ./src/main.deno.js enc",
+    "ded": "deno run ./src/main.deno.js dec",
+    "enz": "./dist/age enc",
+    "dez": "./dist/age dec"
   }
 }
