@@ -3,7 +3,12 @@
     "hash-wasm": "npm:hash-wasm/dist/index.esm.min.js"
   },
   "tasks": {
-    "build:zig": "mkdir -p ./dist && zig build-exe -O ReleaseSafe ./src/main.zig -femit-bin=./dist/age.exe",
+    "build:init": "mkdir -p ./dist && mkdir -p ./deps",
+    "build:zig": "zig build-exe -O ReleaseSafe ./src/main.zig -femit-bin=./dist/age.exe",
+    "build:ghash": "cd ./deps && zig build-exe -O ReleaseSmall -target wasm32-freestanding ../src/ghash.zig -flto -fno-builtin -fno-entry --export=Ghash_init --export=Ghash_update --export=Ghash_pad --export=Ghash_final",
+    "build:aes": "cd ./deps && zig build-exe -O ReleaseSmall -target wasm32-freestanding ../src/aes-gcm.zig -flto -fno-builtin -fno-entry --export=Aes_init --export=Aes_update --export=Aes_final",
+    "test:ghash": "deno test --allow-read=. ./src/ghash.js",
+    "test:aes": "deno test --allow-read=. ./src/aes-gcm.test.js",
     "end": "deno run ./src/main.deno.js enc",
     "ded": "deno run ./src/main.deno.js dec",
     "enz": "./dist/age enc",
