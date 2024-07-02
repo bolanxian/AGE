@@ -78,7 +78,7 @@ fn AesGcmStream(comptime Aes: anytype) type {
         }
         pub fn update(
             self: *Self,
-            comptime @"🔐": @TypeOf(Exports.@"🔐"),
+            comptime @"🔐": @TypeOf(Context.@"🔐"),
             comptime withSuffixTag: u1,
         ) void {
             const src = self.src;
@@ -115,7 +115,7 @@ fn AesGcmStream(comptime Aes: anytype) type {
         }
         pub fn final(
             self: *Self,
-            comptime @"🔐": @TypeOf(Exports.@"🔐"),
+            comptime @"🔐": @TypeOf(Context.@"🔐"),
             comptime withSuffixTag: u1,
         ) u32 {
             const leftover = if (@"🔐" == .decrypt and withSuffixTag != 0)
@@ -180,13 +180,11 @@ fn AesGcmStream(comptime Aes: anytype) type {
 pub const Aes128GcmStream = AesGcmStream(AES.Aes128);
 pub const Aes256GcmStream = AesGcmStream(AES.Aes256);
 
-pub const Exports = struct {
-    var aes: enum {
-        aes128,
-        aes256,
+const Context = struct {
+    var aes: union(enum) {
+        aes128: Aes128GcmStream,
+        aes256: Aes256GcmStream,
     } = undefined;
-    var aes128: Aes128GcmStream = undefined;
-    var aes256: Aes256GcmStream = undefined;
     var @"🔐": enum {
         encrypt,
         decrypt,
@@ -194,54 +192,39 @@ pub const Exports = struct {
     var withSuffixTag: u1 = undefined;
     var src: [buffer_length]u8 = undefined;
     var dst: [buffer_length]u8 = undefined;
-    pub inline fn update(ctx: anytype) void {
-        return switch (@"🔐") {
-            inline else => |i| switch (withSuffixTag) {
-                inline else => |j| ctx.update(i, j),
+    inline fn create(key: []const u8) @TypeOf(aes) {
+        return switch (key.len) {
+            16 => .{
+                .aes128 = Aes128GcmStream.init(key[0..16], &src, &dst),
             },
-        };
-    }
-    pub inline fn final(ctx: anytype) u32 {
-        return switch (@"🔐") {
-            inline else => |i| switch (withSuffixTag) {
-                inline else => |j| ctx.final(i, j),
+            32 => .{
+                .aes256 = Aes256GcmStream.init(key[0..32], &src, &dst),
             },
+            else => unreachable,
         };
     }
 };
 pub export fn Aes_init(init: u32) void {
     var key: [64]u8 = undefined;
-    Exports.aes = switch (Env.read(.AesKey, &key)) {
-        16 => do: {
-            Exports.aes128 = Aes128GcmStream.init(
-                key[0..16],
-                &Exports.src,
-                &Exports.dst,
-            );
-            break :do .aes128;
-        },
-        32 => do: {
-            Exports.aes256 = Aes256GcmStream.init(
-                key[0..32],
-                &Exports.src,
-                &Exports.dst,
-            );
-            break :do .aes256;
-        },
-        else => unreachable,
-    };
-    Exports.@"🔐" = if (init & 0b1 != 0) .encrypt else .decrypt;
-    Exports.withSuffixTag = if (init & 0b10 != 0) 1 else 0;
+    Context.aes = Context.create(key[0..Env.read(.AesKey, &key)]);
+    Context.@"🔐" = if (init & 0b1 != 0) .encrypt else .decrypt;
+    Context.withSuffixTag = if (init & 0b10 != 0) 1 else 0;
 }
 pub export fn Aes_update() void {
-    return switch (Exports.aes) {
-        .aes128 => Exports.update(&Exports.aes128),
-        .aes256 => Exports.update(&Exports.aes256),
+    return switch (Context.aes) {
+        inline else => |*aes| switch (Context.@"🔐") {
+            inline else => |i| switch (Context.withSuffixTag) {
+                inline else => |j| aes.update(i, j),
+            },
+        },
     };
 }
 pub export fn Aes_final() u32 {
-    return switch (Exports.aes) {
-        .aes128 => Exports.final(&Exports.aes128),
-        .aes256 => Exports.final(&Exports.aes256),
+    return switch (Context.aes) {
+        inline else => |*aes| switch (Context.@"🔐") {
+            inline else => |i| switch (Context.withSuffixTag) {
+                inline else => |j| aes.final(i, j),
+            },
+        },
     };
 }
