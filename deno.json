@@ -9,8 +9,8 @@
     "build:aes": "cd ./deps && zig build-exe -O ReleaseSmall -target wasm32-freestanding ../src/aes-gcm.zig -flto -fno-builtin -fno-entry --export=Aes_init --export=Aes_update --export=Aes_final",
     "test:ghash": "deno test --allow-read=. ./src/ghash.js",
     "test:aes": "deno test --allow-read=. ./src/aes-gcm.test.js",
-    "end": "deno run ./src/main.deno.js enc",
-    "ded": "deno run ./src/main.deno.js dec",
+    "end": "deno run -R -W ./src/main.deno.js enc",
+    "ded": "deno run -R -W ./src/main.deno.js dec",
     "enz": "./dist/age enc",
     "dez": "./dist/age dec"
   }

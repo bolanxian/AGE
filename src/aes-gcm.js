@@ -5,8 +5,12 @@ const { set, slice, subarray } = $typedArray
 const { enqueue } = $transformController
 const U8 = Uint8Array, Transform = TransformStream, Exception = DOMException
 
-const modulePromise = compileStreaming(fetch(import.meta.resolve('../deps/aes-gcm.wasm')))
-const create = (init, key, iv, aad) => {
+let modulePromise
+export const init = () => {
+  modulePromise ??= compileStreaming(fetch(import.meta.resolve('../deps/aes-gcm.wasm')))
+  return modulePromise
+}
+const create = (init_code, key, iv, aad) => {
   const importObject = {
     env: {
       read(fd, ptr, len) {
@@ -45,13 +49,13 @@ const create = (init, key, iv, aad) => {
   }
   return new Transform({
     async start() {
-      const instance = await instantiate(await modulePromise, importObject)
+      const instance = await instantiate(await init(), importObject)
       !({ memory, Aes_init, Aes_update, Aes_final } = getInstanceExports(instance))
       buffer = getMemoryBuffer(memory)
       context[1] = key
       context[2] = iv
       context[3] = aad
-      Aes_init(init)
+      Aes_init(init_code)
     },
     transform(chunk, controller) {
       try {
@@ -83,6 +87,5 @@ const create = (init, key, iv, aad) => {
   })
 }
 
-export { modulePromise as ready }
 export const createAesGcmEncryptStream = (key, iv, aad) => create(0b11, key, iv, aad)
 export const createAesGcmDecryptStream = (key, iv, aad) => create(0b10, key, iv, aad)

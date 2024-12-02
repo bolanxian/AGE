@@ -1,8 +1,17 @@
+const builtin = @import("builtin");
 const std = @import("std");
+const io = std.io;
 const mem = std.mem;
 const Ghash = std.crypto.onetimeauth.Ghash;
 const AES = std.crypto.core.aes;
+const AnyReader = io.AnyReader;
+const AnyWriter = io.AnyWriter;
+const isWasm = builtin.cpu.arch.isWasm();
 
+pub const EncryptOrDecrypt = enum {
+    encrypt,
+    decrypt,
+};
 pub const Fd = enum(usize) {
     Unreachable = 0,
     AesKey = 1,
@@ -13,29 +22,88 @@ pub const Fd = enum(usize) {
     AesWritableStream = 6,
 };
 
-pub const Env = struct {
+pub const Context = if (isWasm) struct {
+    const Self = @This();
+    _: void = {},
     const Inner = struct {
         extern "env" fn read(fd: Fd, ptr: [*]u8, len: usize) usize;
         extern "env" fn write(fd: Fd, ptr: [*]const u8, len: usize) usize;
     };
-    pub inline fn read(fd: Fd, buf: []u8) usize {
+    pub inline fn read(_: *const Self, fd: Fd, buf: []u8) usize {
         return Inner.read(fd, buf.ptr, buf.len);
     }
-    pub inline fn write(fd: Fd, buf: []const u8) usize {
+    pub inline fn write(_: *const Self, fd: Fd, buf: []const u8) usize {
         return Inner.write(fd, buf.ptr, buf.len);
+    }
+} else struct {
+    const Self = @This();
+    reader: AnyReader,
+    writer: AnyWriter,
+    @"error": ?anyerror = null,
+    aad: []const u8,
+    iv: []const u8,
+    tag: []u8,
+    pub fn init(
+        reader: AnyReader,
+        writer: AnyWriter,
+        aad: []const u8,
+        iv: []const u8,
+        tag: []u8,
+    ) Self {
+        return .{
+            .reader = reader,
+            .writer = writer,
+            .aad = aad,
+            .iv = iv,
+            .tag = tag,
+        };
+    }
+    pub inline fn read(self: *const Self, fd: Fd, buf: []u8) usize {
+        switch (fd) {
+            .AesIv => {
+                const len = @min(buf.len, self.iv.len);
+                @memcpy(buf[0..len], self.iv[0..len]);
+                return len;
+            },
+            .AesAad => {
+                const len = @min(buf.len, self.aad.len);
+                @memcpy(buf[0..len], self.aad[0..len]);
+                return len;
+            },
+            .AesReadableStream => self.reader.readAll(buf) catch |err| {
+                self.@"error" = err;
+                return 0;
+            },
+            else => return 0,
+        }
+    }
+    pub inline fn write(self: *const Self, fd: Fd, buf: []const u8) usize {
+        switch (fd) {
+            .AesTag => {
+                const len = @min(self.tag.len, buf.len);
+                @memcpy(self.tag[0..len], buf[0..len]);
+                return len;
+            },
+            .AesWritableStream => self.writer.writeAll(buf) catch |err| {
+                self.@"error" = err;
+                return 0;
+            },
+            else => return 0,
+        }
     }
 };
 
 pub const buffer_length = 65536 * 2;
-const zeros = [_]u8{0} ** 16;
 
-fn AesGcmStream(comptime Aes: anytype) type {
+fn AesGcmStream(comptime Aes: type) type {
     return struct {
         const Self = @This();
         pub const block_length = AES.Block.block_length;
+        pub const zeros = [_]u8{0} ** block_length;
         pub const tag_length = 16;
         pub const iv_length = 12;
         pub const key_length = Aes.key_bits / 8;
+        ctx: Context,
         aes: AES.AesEncryptCtx(Aes) = undefined,
         mac: Ghash = undefined,
         iv: [16]u8 = undefined,
@@ -46,11 +114,12 @@ fn AesGcmStream(comptime Aes: anytype) type {
         src: *[buffer_length]u8 = undefined,
         dst: *[buffer_length]u8 = undefined,
         pub fn init(
+            ctx: Context,
             key: *const [key_length]u8,
             src: *[buffer_length]u8,
             dst: *[buffer_length]u8,
         ) Self {
-            var self = Self{ .src = src, .dst = dst };
+            var self = Self{ .ctx = ctx, .src = src, .dst = dst };
             const buffer = src;
             self.aes = Aes.initEnc(key.*);
             const aes = &self.aes;
@@ -61,7 +130,7 @@ fn AesGcmStream(comptime Aes: anytype) type {
             self.mac = Ghash.init(&h);
             const mac = &self.mac;
             while (true) {
-                const amt = Env.read(.AesAad, buffer);
+                const amt = self.ctx.read(.AesAad, buffer);
                 if (amt == 0) break;
                 mac.update(buffer[0..amt]);
                 self.ad_len += amt;
@@ -69,7 +138,7 @@ fn AesGcmStream(comptime Aes: anytype) type {
             mac.pad();
 
             var iv: [16]u8 = undefined;
-            _ = Env.read(.AesIv, iv[0..iv_length]);
+            _ = self.ctx.read(.AesIv, iv[0..iv_length]);
             mem.writeInt(u32, iv[iv_length..][0..4], 1, .big);
             self.iv = iv;
             mem.writeInt(u32, iv[iv_length..][0..4], 2, .big);
@@ -78,12 +147,12 @@ fn AesGcmStream(comptime Aes: anytype) type {
         }
         pub fn update(
             self: *Self,
-            comptime @"🔐": @TypeOf(Context.@"🔐"),
+            comptime @"🔐": EncryptOrDecrypt,
             comptime withSuffixTag: u1,
         ) void {
             const src = self.src;
             const dst = self.dst;
-            self.leftover += Env.read(.AesReadableStream, src[self.leftover..]);
+            self.leftover += self.ctx.read(.AesReadableStream, src[self.leftover..]);
             var i: usize = 0;
             while (switch (@"🔐" == .decrypt and withSuffixTag != 0) {
                 true => i + 32 <= self.leftover,
@@ -100,7 +169,7 @@ fn AesGcmStream(comptime Aes: anytype) type {
                     .encrypt => dst,
                     .decrypt => src,
                 }[0..i]);
-                _ = Env.write(.AesWritableStream, dst[0..i]);
+                _ = self.ctx.write(.AesWritableStream, dst[0..i]);
                 const leftover = self.leftover - i;
                 if (leftover > 0) {
                     if (leftover > i) {
@@ -115,7 +184,7 @@ fn AesGcmStream(comptime Aes: anytype) type {
         }
         pub fn final(
             self: *Self,
-            comptime @"🔐": @TypeOf(Context.@"🔐"),
+            comptime @"🔐": EncryptOrDecrypt,
             comptime withSuffixTag: u1,
         ) u32 {
             const leftover = if (@"🔐" == .decrypt and withSuffixTag != 0)
@@ -152,12 +221,12 @@ fn AesGcmStream(comptime Aes: anytype) type {
                 switch (@"🔐") {
                     .encrypt => do: {
                         self.dst[leftover..][0..16].* = tag;
-                        _ = Env.write(.AesWritableStream, self.dst[0 .. leftover + 16]);
+                        _ = self.ctx.write(.AesWritableStream, self.dst[0 .. leftover + 16]);
                         break :do 0;
                     },
                     .decrypt => do: {
                         if (leftover > 0) {
-                            _ = Env.write(.AesWritableStream, self.dst[0..leftover]);
+                            _ = self.ctx.write(.AesWritableStream, self.dst[0..leftover]);
                         }
                         break :do if (std.crypto.utils.timingSafeEql(
                             [16]u8,
@@ -168,9 +237,9 @@ fn AesGcmStream(comptime Aes: anytype) type {
                 }
             else do: {
                 if (leftover > 0) {
-                    _ = Env.write(.AesWritableStream, self.dst[0..leftover]);
+                    _ = self.ctx.write(.AesWritableStream, self.dst[0..leftover]);
                 }
-                _ = Env.write(.AesTag, &tag);
+                _ = self.ctx.write(.AesTag, &tag);
                 break :do 0;
             };
         }
@@ -180,51 +249,61 @@ fn AesGcmStream(comptime Aes: anytype) type {
 pub const Aes128GcmStream = AesGcmStream(AES.Aes128);
 pub const Aes256GcmStream = AesGcmStream(AES.Aes256);
 
-const Context = struct {
-    var aes: union(enum) {
+const Wasm = struct {
+    const Self = @This();
+    var self: Self = undefined;
+    ctx: Context = .{},
+    aes: union(enum) {
         aes128: Aes128GcmStream,
         aes256: Aes256GcmStream,
-    } = undefined;
-    var @"🔐": enum {
-        encrypt,
-        decrypt,
-    } = undefined;
-    var withSuffixTag: u1 = undefined;
-    var src: [buffer_length]u8 = undefined;
-    var dst: [buffer_length]u8 = undefined;
-    inline fn create(key: []const u8) @TypeOf(aes) {
+    } = undefined,
+    @"🔐": EncryptOrDecrypt,
+    withSuffixTag: u1,
+    src: [buffer_length]u8 = undefined,
+    dst: [buffer_length]u8 = undefined,
+    inline fn create(ctx: Context, key: []const u8, src: *[buffer_length]u8, dst: *[buffer_length]u8) @TypeOf(self.aes) {
         return switch (key.len) {
             16 => .{
-                .aes128 = Aes128GcmStream.init(key[0..16], &src, &dst),
+                .aes128 = Aes128GcmStream.init(ctx, key[0..16], src, dst),
             },
             32 => .{
-                .aes256 = Aes256GcmStream.init(key[0..32], &src, &dst),
+                .aes256 = Aes256GcmStream.init(ctx, key[0..32], src, dst),
             },
             else => unreachable,
         };
     }
+    pub fn init(init_code: u32) callconv(.C) void {
+        var key: [64]u8 = undefined;
+        self = .{
+            .@"🔐" = if (init_code & 0b1 != 0) .encrypt else .decrypt,
+            .withSuffixTag = if (init_code & 0b10 != 0) 1 else 0,
+        };
+        self.aes = create(self.ctx, key[0..self.ctx.read(.AesKey, &key)], &self.src, &self.dst);
+    }
+    pub fn update() callconv(.C) void {
+        return switch (self.aes) {
+            inline else => |*aes| switch (self.@"🔐") {
+                inline else => |i| switch (self.withSuffixTag) {
+                    inline else => |j| aes.update(i, j),
+                },
+            },
+        };
+    }
+    pub fn final() callconv(.C) u32 {
+        return switch (self.aes) {
+            inline else => |*aes| switch (self.@"🔐") {
+                inline else => |i| switch (self.withSuffixTag) {
+                    inline else => |j| aes.final(i, j),
+                },
+            },
+        };
+    }
+    comptime {
+        @export(init, .{ .name = "Aes_init" });
+        @export(update, .{ .name = "Aes_update" });
+        @export(final, .{ .name = "Aes_final" });
+    }
 };
-pub export fn Aes_init(init: u32) void {
-    var key: [64]u8 = undefined;
-    Context.aes = Context.create(key[0..Env.read(.AesKey, &key)]);
-    Context.@"🔐" = if (init & 0b1 != 0) .encrypt else .decrypt;
-    Context.withSuffixTag = if (init & 0b10 != 0) 1 else 0;
-}
-pub export fn Aes_update() void {
-    return switch (Context.aes) {
-        inline else => |*aes| switch (Context.@"🔐") {
-            inline else => |i| switch (Context.withSuffixTag) {
-                inline else => |j| aes.update(i, j),
-            },
-        },
-    };
-}
-pub export fn Aes_final() u32 {
-    return switch (Context.aes) {
-        inline else => |*aes| switch (Context.@"🔐") {
-            inline else => |i| switch (Context.withSuffixTag) {
-                inline else => |j| aes.final(i, j),
-            },
-        },
-    };
+comptime {
+    if (isWasm) _ = Wasm;
 }

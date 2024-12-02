@@ -1,6 +1,5 @@
 
 import { crc32 } from 'hash-wasm'
-
 const { assign } = Object
 
 const typeLength = {
@@ -12,7 +11,7 @@ const typeMethod = {
   'u32': 'Uint32', 'u64': 'BigUint64'
 }
 
-const createStruct = (fields, _default) => {
+export const createStruct = (fields, defaultValue) => {
   let length = 0
   return class {
     #view
@@ -36,7 +35,7 @@ const createStruct = (fields, _default) => {
       }
     }
     static byteLength = length
-    static default = _default
+    static default = defaultValue
   }
 }
 
@@ -59,15 +58,15 @@ export const packDate = (
 }
 export const defaultDate = packDate()
 
-export const pack = (type, init) => {
-  const buffer = new ArrayBuffer(type.byteLength)
-  const self = new type(buffer, 0)
-  assign(self, type.default, init)
+export const pack = (T, init) => {
+  const buffer = new ArrayBuffer(T.byteLength)
+  const self = new T(buffer, 0)
+  assign(self, T.default, init)
   return new Uint8Array(buffer)
 }
-export const from = (type, buffer, byteOffset) => {
-  const self = new type(buffer, byteOffset)
-  if (type.default.magic !== self.magic) {
+export const from = (T, buffer, byteOffset) => {
+  const self = new T(buffer, byteOffset)
+  if (T.default.magic !== self.magic) {
     throw new TypeError('InvalidMagicNumber')
   }
   return self
@@ -128,12 +127,11 @@ export const EndOfCentralDirectory = createStruct([
 })
 
 const encoder = new TextEncoder()
-export const write = async (file, name, content, extra) => {
-  const _date = new Date()
-  const date = packDate(
+export const write = async (file, name, content, _date, extra) => {
+  const date = _date != null ? packDate(
     _date.getFullYear(), _date.getMonth() + 1, _date.getDate(),
     _date.getHours(), _date.getMinutes(), _date.getSeconds()
-  )
+  ) : defaultDate
   name = typeof name == 'string' ? encoder.encode(name) : name
   content = typeof content == 'string' ? encoder.encode(content) : content
   const crc = parseInt(await crc32(content), 16)
@@ -186,7 +184,7 @@ export const read = async (file) => {
   }
 
   const size = eocd.offset - offset;
-  if (size == 0) {
+  if (!(size > 0)) {
     return new TypeError('NoExtraData')
   }
   await file.seek(offset, Deno.SeekMode.Start)
@@ -196,10 +194,11 @@ export const read = async (file) => {
 }
 
 if (import.meta.main) {
+  const { log } = console
   const input = await Deno.open(Deno.args[0], { create: true, write: true })
   try {
     const data = crypto.getRandomValues(new Uint8Array(32))
-    console.log(data)
+    log(data)
     await write(input, 'name', 'content', [data])
   } finally {
     input.close()
@@ -207,7 +206,7 @@ if (import.meta.main) {
   const output = await Deno.open(Deno.args[0], { read: true })
   try {
     const data = await read(output)
-    console.log(data)
+    log(data)
   } finally {
     output.close()
   }

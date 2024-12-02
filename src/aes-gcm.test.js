@@ -1,7 +1,7 @@
 
 import { Buffer } from 'node:buffer'
 import { assertEquals as eq } from 'https://deno.land/std/assert/mod.ts'
-import { ready, createAesGcmEncryptStream, createAesGcmDecryptStream } from './aes-gcm.js'
+import { init, createAesGcmEncryptStream, createAesGcmDecryptStream } from './aes-gcm.js'
 import { toReadable, toBuffer } from './bind.js'
 
 const { subtle } = crypto
@@ -18,7 +18,7 @@ const encryptWeb = async (msg, key, iv) => {
   return data
 }
 
-await ready
+await init()
 for (const keyLength of [16, 32, 16, 32]) {
   Deno.test(`AES-${keyLength * 8}-GCM`, async (t) => {
     const key = new Uint8Array(keyLength)

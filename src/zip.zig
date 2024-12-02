@@ -1,4 +1,5 @@
 const std = @import("std");
+const ft = @import("file-time.zig");
 const mem = std.mem;
 const File = std.fs.File;
 const AnyWriter = std.io.AnyWriter;
@@ -11,6 +12,28 @@ pub const Date = packed struct(u32) {
     date: u5 = 1,
     month: u4 = 1,
     year: u7 = 0,
+    pub fn fromSystemTime(systemTime: *const ft.SYSTEMTIME) Date {
+        return .{
+            .year = @intCast(systemTime.wYear - 1980),
+            .month = @intCast(systemTime.wMonth),
+            .date = @intCast(systemTime.wDay),
+            .hours = @intCast(systemTime.wHour),
+            .minutes = @intCast(systemTime.wMinute),
+            .double_seconds = @intCast(@divFloor(systemTime.wSecond, 2)),
+        };
+    }
+    pub fn fromHandle(hFile: ft.HANDLE) !Date {
+        var time: ft.FILETIME = undefined;
+        var localTime: ft.FILETIME = undefined;
+        var systemTime: ft.SYSTEMTIME = undefined;
+        try ft.GetFileTime(hFile, null, null, &time);
+        try ft.FileTimeToLocalFileTime(&time, &localTime);
+        try ft.FileTimeToSystemTime(&localTime, &systemTime);
+        return Date.fromSystemTime(&systemTime);
+    }
+    pub fn fromFile(file: File) !Date {
+        return Date.fromHandle(file.handle);
+    }
 };
 pub const LocalFileHeader = packed struct(u240) {
     pub const MAGIC = 0x04034b50;
@@ -66,11 +89,11 @@ pub fn Array(comptime T: type) type {
     return [Size(T)]u8;
 }
 
-pub inline fn pack(comptime T: type, self: T) Array(T) {
-    return @bitCast(mem.nativeToLittle(Int(T), @bitCast(self)));
+pub inline fn pack(self: anytype) Array(@TypeOf(self)) {
+    return @bitCast(mem.nativeToLittle(Int(@TypeOf(self)), @bitCast(self)));
 }
-pub inline fn packTo(comptime T: type, data: []u8, self: T) void {
-    data[0..Size(T)].* = pack(T, self);
+pub inline fn packTo(data: []u8, self: anytype) void {
+    data[0..Size(@TypeOf(self))].* = pack(self);
 }
 pub inline fn unpack(comptime T: type, data: []const u8) !T {
     const inst: T = @bitCast(mem.littleToNative(Int(T), @bitCast(data[0..Size(T)].*)));
@@ -83,12 +106,14 @@ pub fn write(
     file: AnyWriter,
     name: []const u8,
     content: []const u8,
+    date: Date,
     extra: []const []const u8,
 ) AnyWriter.Error!void {
     const crc32 = Crc32.hash(content);
     const size: u32 = @intCast(content.len);
     const name_len: u16 = @intCast(name.len);
-    try file.writeAll(&pack(LocalFileHeader, .{
+    try file.writeAll(&pack(LocalFileHeader{
+        .date = date,
         .crc32 = crc32,
         .comp_size = size,
         .size = size,
@@ -104,7 +129,8 @@ pub fn write(
         }
         break :do len;
     };
-    try file.writeAll(&pack(CentralDirectoryHeader, .{
+    try file.writeAll(&pack(CentralDirectoryHeader{
+        .date = date,
         .crc32 = crc32,
         .comp_size = size,
         .size = size,
@@ -112,7 +138,7 @@ pub fn write(
         .offset = 0,
     }));
     try file.writeAll(name);
-    try file.writeAll(&pack(EndOfCentralDirectory, .{
+    try file.writeAll(&pack(EndOfCentralDirectory{
         .size = @intCast(Size(CentralDirectoryHeader) + name.len),
         .offset = @intCast(Size(LocalFileHeader) + name.len + content.len + extra_len),
     }));
@@ -144,10 +170,10 @@ pub fn read(alloc: mem.Allocator, file: File) ReadError![]u8 {
         }
         break :do offset;
     };
-    const size = eocd.offset - offset;
-    if (size == 0) {
+    if (!(eocd.offset > offset)) {
         return ReadError.NoExtraData;
     }
+    const size = eocd.offset - offset;
     try file.seekTo(offset);
     const data = try alloc.alloc(u8, size);
     errdefer alloc.free(data);
