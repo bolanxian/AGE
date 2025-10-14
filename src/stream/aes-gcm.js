@@ -7,7 +7,7 @@ const U8 = Uint8Array, Transform = TransformStream, Exception = DOMException
 
 let modulePromise
 export const init = () => {
-  modulePromise ??= compileStreaming(fetch(import.meta.resolve('../deps/aes-gcm.wasm')))
+  modulePromise ??= compileStreaming(fetch(import.meta.resolve('@/deps/aes-gcm.wasm')))
   return modulePromise
 }
 const create = (init_code, key, iv, aad) => {

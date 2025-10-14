@@ -1,7 +1,7 @@
 
-const modulePromise = WebAssembly.compileStreaming(fetch(import.meta.resolve('../deps/ghash.wasm')))
+const modulePromise = WebAssembly.compileStreaming(fetch(import.meta.resolve('@/deps/ghash.wasm')))
 const { instantiate } = WebAssembly, U8 = Uint8Array
-const create = async () => {
+export const create = async () => {
   const instance = await instantiate(await modulePromise, {
     env: {
       read(fd, ptr, len) {

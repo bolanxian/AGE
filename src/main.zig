@@ -65,12 +65,91 @@ pub fn decrypt(allocator: mem.Allocator, header: *AgeHeader, data: []const u8, p
     return msg;
 }
 
-pub fn withSuffix(allocator: mem.Allocator, path: []const u8) ![]const u8 {
-    return mem.concat(allocator, u8, &[_][]const u8{ path, ".zip" });
-}
 comptime {
     if (builtin.cpu.arch.endian() != .little)
         @compileError("Only support little endian");
+}
+fn help(allocator: mem.Allocator, args: [][:0]u8) !void {
+    const arg0 = try fs.path.relative(allocator, ".", args[0]);
+    defer allocator.free(arg0);
+    log.info("Usage : {s} <\"e\" | \"d\"> <input file> <output file> <password>", .{arg0});
+    return;
+}
+
+fn main_encrypt(allocator: mem.Allocator, dir: fs.Dir, input_file: []const u8, output_file: []const u8, password: []const u8) !void {
+    const input = try dir.openFile(input_file, .{});
+    defer input.close();
+
+    const msg = try input.readToEndAlloc(allocator, std.math.maxInt(u32));
+    defer allocator.free(msg);
+
+    var salt: [16]u8 = undefined;
+    try std.posix.getrandom(&salt);
+    const encrypted = try encrypt(allocator, msg, password, &salt, 512 * 1024, 5, 4);
+    defer allocator.free(encrypted);
+
+    const output = try dir.createFile(output_file, .{});
+    defer output.close();
+
+    const name = if (mem.lastIndexOfAny(u8, input_file, "\\/")) |index|
+        input_file[index + 1 ..]
+    else
+        input_file;
+
+    var header = zip.LocalFileHeader{
+        .date = try zip.Date.fromFile(input),
+        .crc32 = AgeHeader.MAGIC,
+        .comp_size = 0,
+        .size = @intCast(msg.len),
+        .name_len = 0,
+    };
+    try zip.write(output.writer().any(), name, encrypted, &header);
+}
+fn main_decrypt(allocator: mem.Allocator, dir: fs.Dir, input_file: []const u8, output_file: []const u8, password: []const u8) !void {
+    const input = try dir.openFile(input_file, .{});
+    defer input.close();
+
+    const default = &zip.default;
+    var reader = zip.ZipReader.init(allocator, input) catch |err| return switch (err) {
+        error.InvalidMagicNumber => {
+            log.err("不是 zip 文件", .{});
+        },
+        else => err,
+    };
+    defer reader.deinit(allocator);
+    const entry = do: while (reader.next()) |entry| {
+        const head = &entry.central;
+        if (head.version == default.version and head.bit_flag == default.bit_flag and head.comp_method == default.comp_method)
+            break :do entry;
+    } else {
+        log.err("没有合适的文件", .{});
+        return;
+    };
+    const data = entry.read(allocator) catch |err| return switch (err) {
+        error.InvalidMagicNumber, error.InvalidZipHeader => {
+            log.err("文件头部错误", .{});
+        },
+        else => err,
+    };
+    defer allocator.free(data);
+
+    var header: AgeHeader = undefined;
+    const decrypted = decrypt(allocator, &header, data, password) catch |err| return switch (err) {
+        error.InvalidMagicNumber => {
+            log.err("额外数据错误", .{});
+        },
+        error.AuthenticationFailed => {
+            log.err("密码错误", .{});
+        },
+        else => err,
+    };
+    defer allocator.free(decrypted);
+    log.info("$argon2id$v=19$m={d},t={d},p={d}$", .{ header.m, header.t, header.p });
+
+    const output = try dir.createFile(output_file, .{});
+    defer output.close();
+
+    try output.writeAll(decrypted);
 }
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -84,73 +163,29 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len < 4) {
-        const dir = try fs.path.relative(allocator, ".", args[0]);
-        defer allocator.free(dir);
-        log.info("usage : {s} <enc|dec> <filename> <password>", .{dir});
-        return;
+    if (args.len < 2 or args[1].len != 1) {
+        return help(allocator, args);
     }
-    if (mem.eql(u8, args[1], "enc")) {
-        const input = try cwd.openFile(args[2], .{});
-        defer input.close();
-
-        const msg = try input.readToEndAlloc(allocator, std.math.maxInt(u32));
-        defer allocator.free(msg);
-
-        var salt: [16]u8 = undefined;
-        try std.posix.getrandom(&salt);
-        const encrypted = try encrypt(allocator, msg, args[3], &salt, 512 * 1024, 5, 4);
-        defer allocator.free(encrypted);
-
-        const output_name = try withSuffix(allocator, args[2]);
-        defer allocator.free(output_name);
-
-        const output = try cwd.createFile(output_name, .{});
-        defer output.close();
-
-        try zip.write(
-            output.writer().any(),
-            "!encrypted.txt",
-            "本文件已加密",
-            try zip.Date.fromFile(input),
-            &[_][]const u8{encrypted},
-        );
-    } else if (mem.eql(u8, args[1], "dec")) {
-        const input_name = try withSuffix(allocator, args[2]);
-        defer allocator.free(input_name);
-
-        const input = try cwd.openFile(input_name, .{});
-        defer input.close();
-
-        const data = zip.read(allocator, input) catch |err| return switch (err) {
-            error.InvalidMagicNumber => {
-                log.err("不是 zip 文件", .{});
-            },
-            error.NoExtraData => {
-                log.err("没有额外数据", .{});
-            },
-            else => err,
-        };
-        defer allocator.free(data);
-
-        var header: AgeHeader = undefined;
-        const decrypted = decrypt(allocator, &header, data, args[3]) catch |err| return switch (err) {
-            error.InvalidMagicNumber => {
-                log.err("额外数据错误", .{});
-            },
-            error.AuthenticationFailed => {
-                log.err("密码错误", .{});
-            },
-            else => err,
-        };
-        defer allocator.free(decrypted);
-        log.info("$argon2id$v=19$m={d},t={d},p={d}$", .{ header.m, header.t, header.p });
-
-        const output = try cwd.createFile(args[2], .{});
-        defer output.close();
-
-        try output.writeAll(decrypted);
-    } else {
-        log.err("error: unknown command: {s}", .{args[1]});
+    switch (args[1][0]) {
+        'e' => {
+            if (args.len != 5) return help(allocator, args);
+            try main_encrypt(allocator, cwd, args[2], args[3], args[4]);
+        },
+        'd' => {
+            if (args.len != 5) return help(allocator, args);
+            try main_decrypt(allocator, cwd, args[2], args[3], args[4]);
+        },
+        'o' => {
+            if (args.len != 2) return help(allocator, args);
+            const open = @import("./file-dialog.zig").open;
+            const stdout = std.io.getStdOut().writer();
+            if (try open(allocator, "打开文件", "All Files (*.*)\x00*.*\x00")) |file| {
+                defer allocator.free(file);
+                try stdout.writeAll(file);
+            }
+        },
+        else => {
+            log.err("error: unknown command: {s}", .{args[1]});
+        },
     }
 }

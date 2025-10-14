@@ -38,9 +38,9 @@ pub const Date = packed struct(u32) {
 pub const LocalFileHeader = packed struct(u240) {
     pub const MAGIC = 0x04034b50;
     magic: u32 = MAGIC,
-    version: u16 = 0x0A,
-    _2: u16 = 0,
-    _3: u16 = 0,
+    version: u16 = 0x14,
+    bit_flag: u16 = 0x01,
+    comp_method: u16 = 0,
     date: Date = .{},
     crc32: u32,
     comp_size: u32,
@@ -52,9 +52,9 @@ pub const CentralDirectoryHeader = packed struct(u368) {
     pub const MAGIC = 0x02014b50;
     magic: u32 = MAGIC,
     _1: u16 = 0x3F,
-    version: u16 = 0x0A,
-    _3: u16 = 0,
-    _4: u16 = 0,
+    version: u16 = 0x14,
+    bit_flag: u16 = 0x01,
+    comp_method: u16 = 0,
     date: Date = .{},
     crc32: u32,
     comp_size: u32,
@@ -80,10 +80,10 @@ pub const EndOfCentralDirectory = packed struct(u176) {
 };
 
 pub fn Int(comptime T: type) type {
-    return @typeInfo(T).Struct.backing_integer.?;
+    return @typeInfo(T).@"struct".backing_integer.?;
 }
 pub fn Size(comptime T: type) comptime_int {
-    return @typeInfo(Int(T)).Int.bits / 8;
+    return @typeInfo(Int(T)).int.bits / 8;
 }
 pub fn Array(comptime T: type) type {
     return [Size(T)]u8;
@@ -101,46 +101,36 @@ pub inline fn unpack(comptime T: type, data: []const u8) !T {
         error.InvalidMagicNumber;
     return inst;
 }
+pub const default = LocalFileHeader{
+    .crc32 = 0,
+    .comp_size = 0,
+    .size = 0,
+    .name_len = 0,
+};
 
 pub fn write(
     file: AnyWriter,
     name: []const u8,
     content: []const u8,
-    date: Date,
-    extra: []const []const u8,
+    header: *LocalFileHeader,
 ) AnyWriter.Error!void {
-    const crc32 = Crc32.hash(content);
-    const size: u32 = @intCast(content.len);
-    const name_len: u16 = @intCast(name.len);
-    try file.writeAll(&pack(LocalFileHeader{
-        .date = date,
-        .crc32 = crc32,
-        .comp_size = size,
-        .size = size,
-        .name_len = name_len,
-    }));
+    header.name_len = @intCast(name.len);
+    header.comp_size = @intCast(content.len);
+    try file.writeAll(&pack(header.*));
     try file.writeAll(name);
     try file.writeAll(content);
-    const extra_len = do: {
-        var len: usize = 0;
-        for (extra) |data| {
-            len += data.len;
-            try file.writeAll(data);
-        }
-        break :do len;
-    };
     try file.writeAll(&pack(CentralDirectoryHeader{
-        .date = date,
-        .crc32 = crc32,
-        .comp_size = size,
-        .size = size,
-        .name_len = name_len,
+        .date = header.date,
+        .crc32 = header.crc32,
+        .comp_size = header.comp_size,
+        .size = header.size,
+        .name_len = header.name_len,
         .offset = 0,
     }));
     try file.writeAll(name);
     try file.writeAll(&pack(EndOfCentralDirectory{
         .size = @intCast(Size(CentralDirectoryHeader) + name.len),
-        .offset = @intCast(Size(LocalFileHeader) + name.len + content.len + extra_len),
+        .offset = @intCast(Size(LocalFileHeader) + name.len + content.len),
     }));
 }
 
@@ -148,35 +138,78 @@ pub const ReadError = mem.Allocator.Error || File.ReadError || File.SeekError ||
     InvalidMagicNumber,
     NoExtraData,
 };
-pub fn read(alloc: mem.Allocator, file: File) ReadError![]u8 {
-    const eocd = do: {
-        const T = EndOfCentralDirectory;
-        try file.seekFromEnd(-Size(T));
-        var eocd: Array(T) = undefined;
-        _ = try file.readAll(&eocd);
-        break :do try unpack(T, &eocd);
-    };
-    const offset = do: {
+pub const ZipReader = struct {
+    const Self = @This();
+    file: File,
+    header: []const u8,
+    offset: usize = 0,
+    pub fn init(allocator: mem.Allocator, file: File) !Self {
+        const eocd = do: {
+            const T = EndOfCentralDirectory;
+            try file.seekFromEnd(-Size(T));
+            var eocd: Array(T) = undefined;
+            _ = try file.readAll(&eocd);
+            break :do try unpack(T, &eocd);
+        };
         try file.seekTo(eocd.offset);
-        const header = try alloc.alloc(u8, eocd.size);
-        defer alloc.free(header);
+        const header = try allocator.alloc(u8, eocd.size);
+        errdefer allocator.free(header);
         _ = try file.readAll(header);
-        var offset: u64 = 0;
-        var i: usize = 0;
-        while (i < header.len) {
-            const central = try unpack(CentralDirectoryHeader, header[i..]);
-            offset = central.offset + Size(LocalFileHeader) + central.name_len + central.extra_len + central.comp_size;
-            i += Size(CentralDirectoryHeader) + central.name_len + central.extra_len + central.comment_len;
-        }
-        break :do offset;
-    };
-    if (!(eocd.offset > offset)) {
-        return ReadError.NoExtraData;
+
+        return .{
+            .file = file,
+            .header = header,
+        };
     }
-    const size = eocd.offset - offset;
-    try file.seekTo(offset);
-    const data = try alloc.alloc(u8, size);
-    errdefer alloc.free(data);
-    _ = try file.readAll(data);
-    return data;
-}
+    pub fn next(self: *Self) ?ZipEntry {
+        if (self.offset < self.header.len) {
+            const central = unpack(CentralDirectoryHeader, self.header[self.offset..]) catch return null;
+            self.offset += Size(CentralDirectoryHeader);
+            const name = self.header[self.offset..][0..central.name_len];
+            const entry = ZipEntry.init(self.file, central, name);
+            self.offset += central.name_len + central.extra_len + central.comment_len;
+            return entry;
+        }
+        return null;
+    }
+    pub fn deinit(self: *const Self, allocator: mem.Allocator) void {
+        allocator.free(self.header);
+    }
+};
+pub const ZipEntry = struct {
+    const Self = @This();
+    file: File,
+    central: CentralDirectoryHeader,
+    name: []const u8,
+    pub fn init(
+        file: File,
+        central: CentralDirectoryHeader,
+        name: []const u8,
+    ) Self {
+        return .{
+            .file = file,
+            .central = central,
+            .name = name,
+        };
+    }
+    pub fn read(self: *const Self, allocator: mem.Allocator) ![]u8 {
+        const central = &self.central;
+        try self.file.seekTo(central.offset);
+        var buffer: Array(LocalFileHeader) = undefined;
+        _ = try self.file.readAll(&buffer);
+        const header = try unpack(LocalFileHeader, &buffer);
+        inline for (.{
+            "version", "bit_flag",  "comp_method", "date",
+            "crc32",   "comp_size", "size",        "name_len",
+        }) |name| {
+            const a = @field(header, name);
+            const b = @field(central, name);
+            if (a != b) return error.InvalidZipHeader;
+        }
+        const data = try allocator.alloc(u8, central.comp_size);
+        errdefer allocator.free(data);
+        try self.file.seekTo(central.offset + Size(LocalFileHeader) + header.name_len + header.extra_len);
+        _ = try self.file.readAll(data);
+        return data;
+    }
+};

@@ -1,17 +1,19 @@
 {
   "imports": {
+    "@/": "./",
     "hash-wasm": "npm:hash-wasm/dist/index.esm.min.js"
   },
   "tasks": {
     "build:init": "mkdir -p ./dist && mkdir -p ./deps",
-    "build:zig": "zig build-exe -O ReleaseSafe ./src/main.zig -femit-bin=./dist/age.exe",
+    "build:zig": "cd ./deps && zig build-exe -O ReleaseSafe ../src/main.zig --name age",
     "build:ghash": "cd ./deps && zig build-exe -O ReleaseSmall -target wasm32-freestanding ../src/ghash.zig -flto -fno-builtin -fno-entry --export=Ghash_init --export=Ghash_update --export=Ghash_pad --export=Ghash_final",
     "build:aes": "cd ./deps && zig build-exe -O ReleaseSmall -target wasm32-freestanding ../src/aes-gcm.zig -flto -fno-builtin -fno-entry --export=Aes_init --export=Aes_update --export=Aes_final",
-    "test:ghash": "deno test --allow-read=. ./src/ghash.js",
-    "test:aes": "deno test --allow-read=. ./src/aes-gcm.test.js",
-    "end": "deno run -R -W ./src/main.deno.js enc",
-    "ded": "deno run -R -W ./src/main.deno.js dec",
-    "enz": "./dist/age enc",
-    "dez": "./dist/age dec"
+    "test:ghash": "deno test -R=. ./src/stream/ghash.js",
+    "test:aes": "deno test -R=. ./src/stream/aes-gcm.test.js",
+    "requirements": "cd ./dist && pip install pywebview nicegui --target=./site-packages",
+    "build": "deno task build:init && deno task build:zig && cp ./deps/age.exe ./dist/age.exe && cp ./src/age.py ./dist/age.py",
+    "ui": "cd ./dist && python age.py",
+    "e": "./dist/age e",
+    "d": "./dist/age d"
   }
 }
