@@ -1,7 +1,6 @@
 const std = @import("std");
 const windows = std.os.windows;
 const WORD = windows.WORD;
-const WINAPI = windows.WINAPI;
 const BOOL = windows.BOOL;
 const unexpectedError = windows.unexpectedError;
 const GetLastError = windows.kernel32.GetLastError;
@@ -24,15 +23,15 @@ const Inner = struct {
         lpCreationTime: ?*FILETIME,
         lpLastAccessTime: ?*FILETIME,
         lpLastWriteTime: ?*FILETIME,
-    ) callconv(WINAPI) BOOL;
+    ) callconv(.winapi) BOOL;
     pub extern "kernel32" fn FileTimeToLocalFileTime(
         lpFileTime: ?*const FILETIME,
         lpLocalFileTime: ?*FILETIME,
-    ) callconv(WINAPI) BOOL;
+    ) callconv(.winapi) BOOL;
     pub extern "kernel32" fn FileTimeToSystemTime(
         lpFileTime: ?*const FILETIME,
         lpSystemTime: ?*SYSTEMTIME,
-    ) callconv(WINAPI) BOOL;
+    ) callconv(.winapi) BOOL;
 };
 pub inline fn GetFileTime(
     hFile: HANDLE,

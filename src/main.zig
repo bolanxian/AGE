@@ -96,21 +96,25 @@ fn main_encrypt(allocator: mem.Allocator, dir: fs.Dir, input_file: []const u8, o
     else
         input_file;
 
-    var header = zip.LocalFileHeader{
+    var output_buffer: [4096]u8 = undefined;
+    var output_writer = output.writer(&output_buffer);
+    var writer = zip.Writer.init(allocator, &output_writer.interface);
+    defer writer.deinit();
+    var header: zip.LocalFileHeader = .{
         .date = try zip.Date.fromFile(input),
         .crc32 = AgeHeader.MAGIC,
-        .comp_size = 0,
+        .compress_size = 0,
         .size = @intCast(msg.len),
         .name_len = 0,
     };
-    try zip.write(output.writer().any(), name, encrypted, &header);
+    try writer.writeCustom(name, encrypted, &header);
+    try writer.end();
 }
 fn main_decrypt(allocator: mem.Allocator, dir: fs.Dir, input_file: []const u8, output_file: []const u8, password: []const u8) !void {
     const input = try dir.openFile(input_file, .{});
     defer input.close();
 
-    const default = &zip.default;
-    var reader = zip.ZipReader.init(allocator, input) catch |err| return switch (err) {
+    var reader = zip.Reader.init(allocator, input) catch |err| return switch (err) {
         error.InvalidMagicNumber => {
             log.err("不是 zip 文件", .{});
         },
@@ -119,8 +123,10 @@ fn main_decrypt(allocator: mem.Allocator, dir: fs.Dir, input_file: []const u8, o
     defer reader.deinit(allocator);
     const entry = do: while (reader.next()) |entry| {
         const head = &entry.central;
-        if (head.version == default.version and head.bit_flag == default.bit_flag and head.comp_method == default.comp_method)
-            break :do entry;
+        inline for (.{ head.version, head.bit_flag, head.compress_method }) |value| {
+            if (value != @TypeOf(value).default) continue :do;
+        }
+        break :do entry;
     } else {
         log.err("没有合适的文件", .{});
         return;
@@ -178,7 +184,7 @@ pub fn main() !void {
         'o' => {
             if (args.len != 2) return help(allocator, args);
             const open = @import("./file-dialog.zig").open;
-            const stdout = std.io.getStdOut().writer();
+            var stdout = std.fs.File.stdout();
             if (try open(allocator, "打开文件", "All Files (*.*)\x00*.*\x00")) |file| {
                 defer allocator.free(file);
                 try stdout.writeAll(file);

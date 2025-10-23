@@ -5,7 +5,6 @@ const wide_to_string = std.unicode.utf16LeToUtf8Alloc;
 const string_to_wide = std.unicode.utf8ToUtf16LeAllocZ;
 
 const windows = std.os.windows;
-const WINAPI = windows.WINAPI;
 const HWND = windows.HWND;
 const WORD = windows.WORD;
 const DWORD = windows.DWORD;
@@ -42,7 +41,7 @@ pub const OPENFILENAMEW = extern struct {
 };
 const OFN_HIDEREADONLY: DWORD = 0x00000004;
 const OFN_EXPLORER: DWORD = 0x00080000;
-extern "Comdlg32" fn GetOpenFileNameW(lpofn: *OPENFILENAMEW) callconv(WINAPI) BOOL;
+extern "Comdlg32" fn GetOpenFileNameW(lpofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
 
 pub fn open(allocator: mem.Allocator, title: [:0]const u8, filter: [:0]const u8) !?[]u8 {
     const titlew = try string_to_wide(allocator, title);
