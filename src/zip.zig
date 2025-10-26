@@ -6,13 +6,13 @@ const Io = std.Io;
 const Crc32 = std.hash.Crc32;
 
 pub const Version = enum(u16) {
-    pub const default: @This() = .hasDeflateOrCrypto;
+    pub const default: @This() = .oldest;
     oldest = 0xA,
     hasDeflateOrCrypto = 0x14,
     _,
 };
 pub const BitFlag = packed struct(u16) {
-    pub const default: @This() = .{ .crypto = true };
+    pub const default: @This() = .{ .crypto = false };
     crypto: bool,
     _: u15 = 0,
 };
@@ -46,10 +46,10 @@ pub const Date = packed struct(u32) {
         try ft.GetFileTime(hFile, null, null, &time);
         try ft.FileTimeToLocalFileTime(&time, &localTime);
         try ft.FileTimeToSystemTime(&localTime, &systemTime);
-        return Date.fromSystemTime(&systemTime);
+        return .fromSystemTime(&systemTime);
     }
     pub fn fromFile(file: File) !Date {
-        return Date.fromHandle(file.handle);
+        return .fromHandle(file.handle);
     }
 };
 
@@ -90,7 +90,7 @@ pub const EndOfCentralDirectory = packed struct(u176) {
     magic: u32 = MAGIC,
     _1: u16 = 0,
     _2: u16 = 0,
-    _3: u16 = 1,
+    central_count: u16,
     entry_count: u16,
     size: u32,
     offset: u32,
@@ -100,21 +100,21 @@ pub const EndOfCentralDirectory = packed struct(u176) {
 pub fn Int(comptime T: type) type {
     return @typeInfo(T).@"struct".backing_integer.?;
 }
-pub fn Size(comptime T: type) comptime_int {
+pub fn sizeOf(comptime T: type) comptime_int {
     return @divExact(@typeInfo(Int(T)).int.bits, 8);
 }
 pub fn Array(comptime T: type) type {
-    return [Size(T)]u8;
+    return [sizeOf(T)]u8;
 }
 
 pub inline fn pack(self: anytype) Array(@TypeOf(self)) {
     return @bitCast(mem.nativeToLittle(Int(@TypeOf(self)), @bitCast(self)));
 }
 pub inline fn packTo(data: []u8, self: anytype) void {
-    data[0..Size(@TypeOf(self))].* = pack(self);
+    data[0..sizeOf(@TypeOf(self))].* = pack(self);
 }
 pub inline fn unpack(comptime T: type, data: []const u8) !T {
-    const inst: T = @bitCast(mem.littleToNative(Int(T), @bitCast(data[0..Size(T)].*)));
+    const inst: T = @bitCast(mem.littleToNative(Int(T), @bitCast(data[0..sizeOf(T)].*)));
     try if (inst.magic != T.MAGIC)
         error.InvalidMagicNumber;
     return inst;
@@ -122,39 +122,41 @@ pub inline fn unpack(comptime T: type, data: []const u8) !T {
 
 pub const Writer = struct {
     const Self = @This();
+    pub const Options = struct {
+        version: Version = .default,
+        bit_flag: BitFlag = .default,
+        compress_method: CompressMethod = .default,
+    };
     arena: mem.Allocator,
+    options: Options,
     writer: *Io.Writer,
     header: Io.Writer.Allocating,
     entryCount: u16,
     pos: u32,
-    pub fn init(arena: mem.Allocator, writer: *Io.Writer) Self {
+    pub fn init(arena: mem.Allocator, writer: *Io.Writer, options: Options) Self {
         return .{
             .arena = arena,
+            .options = options,
             .writer = writer,
             .header = .init(arena),
             .entryCount = 0,
             .pos = 0,
         };
     }
-    pub fn writeRaw(self: *Self, content: []const u8) !void {
-        try self.writer.writeAll(content);
-        self.pos += @intCast(content.len);
+    pub fn writeRaw(self: *Self, data: []const u8) !void {
+        try self.writer.writeAll(data);
+        self.pos += @intCast(data.len);
     }
-    pub fn writeCustom(
-        self: *Self,
-        name: []const u8,
-        content: []const u8,
-        header: *LocalFileHeader,
-    ) Error!void {
+    pub fn writeCustom(self: *Self, name: []const u8, data: []const u8, header: *LocalFileHeader) Error!void {
         header.name_len = @intCast(name.len);
-        header.compress_size = @intCast(content.len);
+        header.compress_size = @intCast(data.len);
         const pos = self.pos;
         try self.writer.writeStruct(header.*, .little);
-        self.pos += Size(LocalFileHeader);
+        self.pos += sizeOf(LocalFileHeader);
         try self.writer.writeAll(name);
         self.pos += @intCast(name.len);
-        try self.writer.writeAll(content);
-        self.pos += @intCast(content.len);
+        try self.writer.writeAll(data);
+        self.pos += @intCast(data.len);
         try self.header.writer.writeStruct(CentralDirectoryHeader{
             .compress_version = header.version,
             .version = header.version,
@@ -170,23 +172,31 @@ pub const Writer = struct {
         try self.header.writer.writeAll(name);
         self.entryCount += 1;
     }
-    pub fn write(self: *Self, name: []const u8, content: []const u8, date: Date) Error!void {
-        const crc32: std.hash.Crc32 = .init();
-        crc32.update(content);
+    pub fn write(self: *Self, name: []const u8, data: []const u8, date: Date) Error!void {
+        const options = &self.options;
+        const crc32: u32 = do: {
+            var crc32: std.hash.Crc32 = .init();
+            crc32.update(data);
+            break :do crc32.final();
+        };
         var header: LocalFileHeader = .{
+            .version = options.version,
+            .bit_flag = options.bit_flag,
+            .compress_method = options.compress_method,
             .date = date,
-            .crc32 = crc32.final(),
+            .crc32 = crc32,
             .compress_size = 0,
-            .size = @intCast(content.len),
+            .size = @intCast(data.len),
             .name_len = 0,
         };
-        try self.writeCustom(name, content, &header);
+        try self.writeCustom(name, data, &header);
     }
     pub fn end(self: *Self) Error!void {
         const header = try self.header.toOwnedSlice();
         defer self.arena.free(header);
         try self.writer.writeAll(header);
         try self.writer.writeStruct(EndOfCentralDirectory{
+            .central_count = self.entryCount,
             .entry_count = self.entryCount,
             .size = @intCast(header.len),
             .offset = self.pos,
@@ -207,7 +217,7 @@ pub const Reader = struct {
     pub fn init(arena: mem.Allocator, file: File) Error!Self {
         const eocd = do: {
             const T = EndOfCentralDirectory;
-            try file.seekFromEnd(-Size(T));
+            try file.seekFromEnd(-sizeOf(T));
             var eocd: Array(T) = undefined;
             _ = try file.readAll(&eocd);
             break :do try unpack(T, &eocd);
@@ -225,7 +235,7 @@ pub const Reader = struct {
     pub fn next(self: *Self) ?Entry {
         if (self.offset < self.header.len) {
             const central = unpack(CentralDirectoryHeader, self.header[self.offset..]) catch return null;
-            self.offset += Size(CentralDirectoryHeader);
+            self.offset += sizeOf(CentralDirectoryHeader);
             const name = self.header[self.offset..][0..central.name_len];
             const entry = Entry.init(self.file, central, name);
             self.offset += central.name_len + central.extra_len + central.comment_len;
@@ -268,7 +278,7 @@ pub const Reader = struct {
             }
             const data = try arena.alloc(u8, central.compress_size);
             errdefer arena.free(data);
-            try self.file.seekTo(central.offset + Size(LocalFileHeader) + header.name_len + header.extra_len);
+            try self.file.seekTo(central.offset + sizeOf(LocalFileHeader) + header.name_len + header.extra_len);
             _ = try self.file.readAll(data);
             return data;
         }

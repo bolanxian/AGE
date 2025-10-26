@@ -36,12 +36,12 @@ pub fn encrypt(allocator: mem.Allocator, msg: []const u8, password: []const u8, 
     var derived: [32]u8 = undefined;
     try kdf(allocator, &derived, password, salt, m, t, p);
 
-    const data = try allocator.alloc(u8, zip.Size(AgeHeader) + salt.len + msg.len + 16);
+    const data = try allocator.alloc(u8, zip.sizeOf(AgeHeader) + salt.len + msg.len + 16);
     errdefer allocator.free(data);
     zip.packTo(data, AgeHeader{ .m = m, .t = t, .p = p, .salt_len = @intCast(salt.len) });
-    @memcpy(data[zip.Size(AgeHeader)..][0..salt.len], salt);
+    @memcpy(data[zip.sizeOf(AgeHeader)..][0..salt.len], salt);
 
-    const encrypted = data[zip.Size(AgeHeader) + salt.len ..];
+    const encrypted = data[zip.sizeOf(AgeHeader) + salt.len ..];
     const key: *[16]u8 = derived[0..16];
     const iv: *[12]u8 = derived[16..28];
     const tag: *[16]u8 = encrypted[msg.len..][0..16];
@@ -51,11 +51,11 @@ pub fn encrypt(allocator: mem.Allocator, msg: []const u8, password: []const u8, 
 
 pub fn decrypt(allocator: mem.Allocator, header: *AgeHeader, data: []const u8, password: []const u8) ![]u8 {
     header.* = try zip.unpack(AgeHeader, data);
-    const salt = data[zip.Size(AgeHeader)..][0..header.salt_len];
+    const salt = data[zip.sizeOf(AgeHeader)..][0..header.salt_len];
     var derived: [32]u8 = undefined;
     try kdf(allocator, &derived, password, salt, header.m, header.t, header.p);
 
-    const encrypted = data[zip.Size(AgeHeader) + header.salt_len ..];
+    const encrypted = data[zip.sizeOf(AgeHeader) + header.salt_len ..];
     const msg = try allocator.alloc(u8, encrypted.len - 16);
     errdefer allocator.free(msg);
     const key: *[16]u8 = derived[0..16];
@@ -76,6 +76,11 @@ fn help(allocator: mem.Allocator, args: [][:0]u8) !void {
     return;
 }
 
+const options: zip.Writer.Options = .{
+    .version = .hasDeflateOrCrypto,
+    .bit_flag = .{ .crypto = true },
+    .compress_method = .store,
+};
 fn main_encrypt(allocator: mem.Allocator, dir: fs.Dir, input_file: []const u8, output_file: []const u8, password: []const u8) !void {
     const input = try dir.openFile(input_file, .{});
     defer input.close();
@@ -98,9 +103,12 @@ fn main_encrypt(allocator: mem.Allocator, dir: fs.Dir, input_file: []const u8, o
 
     var output_buffer: [4096]u8 = undefined;
     var output_writer = output.writer(&output_buffer);
-    var writer = zip.Writer.init(allocator, &output_writer.interface);
+    var writer = zip.Writer.init(allocator, &output_writer.interface, options);
     defer writer.deinit();
     var header: zip.LocalFileHeader = .{
+        .version = options.version,
+        .bit_flag = options.bit_flag,
+        .compress_method = options.compress_method,
         .date = try zip.Date.fromFile(input),
         .crc32 = AgeHeader.MAGIC,
         .compress_size = 0,
@@ -123,8 +131,11 @@ fn main_decrypt(allocator: mem.Allocator, dir: fs.Dir, input_file: []const u8, o
     defer reader.deinit(allocator);
     const entry = do: while (reader.next()) |entry| {
         const head = &entry.central;
-        inline for (.{ head.version, head.bit_flag, head.compress_method }) |value| {
-            if (value != @TypeOf(value).default) continue :do;
+        inline for (@typeInfo(zip.Writer.Options).@"struct".fields) |field| {
+            const name = field.name;
+            const a = @field(head, name);
+            const b = @field(options, name);
+            if (a != b) continue :do;
         }
         break :do entry;
     } else {
