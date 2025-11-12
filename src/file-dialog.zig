@@ -1,4 +1,5 @@
 const std = @import("std");
+const heap = std.heap;
 const mem = std.mem;
 const zeroes = mem.zeroes;
 const wide_to_string = std.unicode.utf16LeToUtf8Alloc;
@@ -39,43 +40,44 @@ pub const OPENFILENAMEW = extern struct {
     dwReserved: DWORD = 0,
     FlagsEx: DWORD = 0,
 };
-const OFN_HIDEREADONLY: DWORD = 0x00000004;
-const OFN_EXPLORER: DWORD = 0x00080000;
 extern "Comdlg32" fn GetOpenFileNameW(lpofn: *OPENFILENAMEW) callconv(.winapi) BOOL;
+pub const OFN_HIDEREADONLY: DWORD = 0x00000004;
+pub const OFN_EXPLORER: DWORD = 0x00080000;
 
-pub fn open(allocator: mem.Allocator, title: [:0]const u8, filter: [:0]const u8) !?[]u8 {
-    const titlew = try string_to_wide(allocator, title);
-    defer allocator.free(titlew);
-    const filterw = try string_to_wide(allocator, filter);
-    defer allocator.free(filterw);
-    var filew = zeroes([4096:0]u16);
-
+pub fn openW(title: [:0]const u16, filter: [:0]const u16, flags: DWORD) ?[4096:0]u16 {
+    var file = zeroes([4096:0]u16);
     var ofn: OPENFILENAMEW = .{};
-    ofn.lpstrFilter = filterw;
-    ofn.lpstrFile = &filew;
-    ofn.nMaxFile = filew.len;
-    ofn.lpstrTitle = titlew;
-    ofn.Flags = OFN_EXPLORER | OFN_HIDEREADONLY;
-
-    if (GetOpenFileNameW(&ofn) != 0) {
-        var iter = mem.splitScalar(u16, &filew, 0);
-        while (iter.next()) |namew| {
-            if (namew.len == 0) break;
-            return try wide_to_string(allocator, namew);
-        }
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = &file;
+    ofn.nMaxFile = file.len;
+    ofn.lpstrTitle = title;
+    ofn.Flags = flags;
+    return if (GetOpenFileNameW(&ofn) != 0) file else null;
+}
+pub fn open(arena: mem.Allocator, title: []const u8, filter: []const u8) !?[]u8 {
+    const titlew = try string_to_wide(arena, title);
+    defer arena.free(titlew);
+    const filterw = try string_to_wide(arena, filter);
+    defer arena.free(filterw);
+    if (openW(titlew, filterw, OFN_EXPLORER | OFN_HIDEREADONLY)) |fileOwned| {
+        const file = mem.trimEnd(u16, &fileOwned, &.{0});
+        return try wide_to_string(arena, file);
     }
     return null;
 }
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 pub fn main() !void {
-    const allocator = gpa.allocator();
-    const stdout = std.io.getStdOut().writer();
+    var arena_state: heap.ArenaAllocator = .init(heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stdout_state = std.fs.File.stdout().writer(&.{});
+    const stdout = &stdout_state.interface;
 
     const filter = "All Files (*.*)\x00*.*\x00";
     const title = "打开文件";
-    if (try open(allocator, title, filter)) |file| {
-        defer allocator.free(file);
+    if (try open(arena, title, filter)) |file| {
+        defer arena.free(file);
         try stdout.writeAll(file);
     }
 }
