@@ -1,6 +1,7 @@
 
-deno.lock
+*.lock
 package-lock.json
-node_modules
-dist
-deps
+/node_modules
+/target
+/dist
+/deps

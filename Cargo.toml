@@ -1,0 +1,15 @@
+[package]
+name = "age"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.34.1", features = ["default","__screenshot"] }
+egui_extras = { version = "0.34.1", features = ["default", "image"]}
+env_logger = { version = "0.11.10", features = ["auto-color", "humantime"] }
+image = "0.25.10"
+log = "0.4.29"
+rfd = "0.17.2"
+windows = "0.62.2"
+windows-core = "0.62.2"
+winreg = "0.56.0"
